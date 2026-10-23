@@ -10,6 +10,7 @@ on:
 
 jobs:
   build:
+    if: github.repository == 'amclubs/am-cf-tunnel' && github.event_name == 'push'
     runs-on: ubuntu-latest
     container: pandoc/latex
     steps:

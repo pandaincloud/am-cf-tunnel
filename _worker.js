@@ -13,7 +13,7 @@ let userID = '866853eb-5293-4f09-bf00-e13eb237c655';
 let proxyIPs;
 
 // if you want to use ipv6 or single proxyIP, please add comment at this line and remove comment at the next line
-let proxyIP = '';//
+let proxyIP = '58.176.95.46'; // Existing repository relay verified with OpenAI TLS.
 
 let sub = '';// 留空则使用内置订阅
 let subconverter = 'url.v1.mk';// clash订阅转换后端，自带虚假uuid和host订阅。
@@ -23,6 +23,11 @@ let subProtocol = 'https';
 // Setting the address will ignore proxyIP
 // Example:  user:pass@host:port  or  host:port
 let socks5Address = '';
+
+// Capture source defaults before subscription requests update the shared UI state.
+const defaultConnectionConfig = Object.freeze({ userID, proxyIP, socks5Address });
+
+class SubscriptionSourceError extends Error {}
 
 if (!isValidUUID(userID)) {
 	throw new Error('uuid is not valid');
@@ -39,12 +44,18 @@ const expire = 4102329600;//2099-12-31
 
 // 设置优选地址，不带端口号默认443，TLS订阅生成
 let addresses = [
-	'icook.hk:443#t.me/AM_CLUBS',//官方优选域名
-	//'cloudflare.cfgo.cc:443#关注YouTube频道@AM_CLUB',
-	'visa.com:443#youtube.com/@AM_CLUB'
+	'162.159.129.11:2053#US 2',
+	'162.159.129.67:8443#US 3',
+	'104.16.134.27:2083#US 4',
+	'104.25.254.4:2087#US 5',
+	'104.17.128.1:2096#US 6',
+	'104.17.142.12:443#HK 4',
+	'104.17.68.85:443#HK 5',
+	'104.17.71.31:443#HK 6',
+	'icook.tw:443#TW'
 ];
 // 设置优选地址api接口
-let addressesapi = ['https://raw.githubusercontent.com/amclubs/am-cf-tunnel/main/ipv4.txt'];
+let addressesapi = ['https://raw.githubusercontent.com/pandaincloud/am-cf-tunnel/main/ipv4.txt'];
 
 let addressesnotls = [];
 let addressesnotlsapi = [];
@@ -204,42 +215,51 @@ export default {
 					return new Response('Not found', { status: 404 });
 				}
 			} else {
-				proxyIP = url.searchParams.get('proxyip') || proxyIP;
-				if (new RegExp('/proxyip=', 'i').test(url.pathname)) proxyIP = url.pathname.toLowerCase().split('/proxyip=')[1];
-				else if (new RegExp('/proxyip.', 'i').test(url.pathname)) proxyIP = `proxyip.${url.pathname.toLowerCase().split("/proxyip.")[1]}`;
-				
-				socks5Address = url.searchParams.get('socks5') || socks5Address;
-				if (new RegExp('/socks5=', 'i').test(url.pathname)) socks5Address = url.pathname.split('5=')[1];
-				else if (new RegExp('/socks://', 'i').test(url.pathname) || new RegExp('/socks5://', 'i').test(url.pathname)) {
-					socks5Address = url.pathname.split('://')[1].split('#')[0];
-					if (socks5Address.includes('@')){
-						let userPassword = socks5Address.split('@')[0];
-						const base64Regex = /^(?:[A-Z0-9+/]{4})*(?:[A-Z0-9+/]{2}==|[A-Z0-9+/]{3}=)?$/i;
-						if (base64Regex.test(userPassword) && !userPassword.includes(':')) userPassword = atob(userPassword);
-						socks5Address = `${userPassword}@${socks5Address.split('@')[1]}`;
-					}
-				}
-				if (socks5Address) {
-					try {
-						parsedSocks5Address = socks5AddressParser(socks5Address);
-						enableSocks = true;
-					} catch (err) {
-						/** @type {Error} */ 
-						let e = err;
-						console.log(e.toString());
-						enableSocks = false;
-					}
-				} else {
-					enableSocks = false;
-				}
-				return await vlessOverWSHandler(request);
+				const connectionOptions = await getConnectionOptions(request, env);
+				return await vlessOverWSHandler(request, connectionOptions);
 			}
 		} catch (err) {
+			if (err instanceof SubscriptionSourceError) {
+				return new Response('Subscription source temporarily unavailable. Keep the previous subscription and retry later.', { status: 503 });
+			}
 			/** @type {Error} */ let e = err;
 			return new Response(e.toString());
 		}
 	},
 };
+
+// Every tunnel owns its routing settings; another request must not change a retry.
+async function getConnectionOptions(request, env) {
+	const url = new URL(request.url);
+	let requestProxyIP = url.searchParams.get('proxyip') || env.PROXYIP || defaultConnectionConfig.proxyIP;
+	if (/\/proxyip=/i.test(url.pathname)) requestProxyIP = url.pathname.split(/\/proxyip=/i)[1];
+	else if (/\/proxyip\./i.test(url.pathname)) requestProxyIP = `proxyip.${url.pathname.split(/\/proxyip\./i)[1]}`;
+	let requestSocks5 = url.searchParams.get('socks5') || env.SOCKS5 || defaultConnectionConfig.socks5Address;
+	if (/\/socks5=/i.test(url.pathname)) requestSocks5 = url.pathname.split(/\/socks5=/i)[1];
+	else if (/\/socks5?:\/\//i.test(url.pathname)) {
+		requestSocks5 = url.pathname.split('://')[1].split('#')[0];
+		if (requestSocks5.includes('@')) {
+			let userPassword = requestSocks5.split('@')[0];
+			const base64Regex = /^(?:[A-Z0-9+/]{4})*(?:[A-Z0-9+/]{2}==|[A-Z0-9+/]{3}=)?$/i;
+			if (base64Regex.test(userPassword) && !userPassword.includes(':')) userPassword = atob(userPassword);
+			requestSocks5 = `${userPassword}@${requestSocks5.split('@')[1]}`;
+		}
+	}
+	let socks5 = null;
+	if (requestSocks5) {
+		try {
+			socks5 = Object.freeze(socks5AddressParser(requestSocks5));
+		} catch {
+			console.warn('Invalid SOCKS5 configuration; using the ProxyIP fallback.');
+		}
+	}
+	const candidates = (await ADD(requestProxyIP)).map(value => value.trim()).filter(Boolean);
+	return Object.freeze({
+		userID: (env.UUID || defaultConnectionConfig.userID).toLowerCase(),
+		proxyIP: candidates[Math.floor(Math.random() * candidates.length)] || '',
+		socks5,
+	});
+}
 
 /**
  * 处理 VLESS over WebSocket 的请求
@@ -247,7 +267,7 @@ export default {
  * @param {import("@cloudflare/workers-types").Request} request The incoming request object.
  * @returns {Promise<Response>} A Promise that resolves to a WebSocket response object.
  */
-async function vlessOverWSHandler(request) {
+async function vlessOverWSHandler(request, connectionOptions) {
 
 	/** @type {import("@cloudflare/workers-types").WebSocket[]} */
 	// @ts-ignore
@@ -287,8 +307,11 @@ async function vlessOverWSHandler(request) {
 			if (remoteSocketWapper.value) {
 				// 如果已有远程 Socket，直接写入数据
 				const writer = remoteSocketWapper.value.writable.getWriter()
-				await writer.write(chunk);
-				writer.releaseLock();
+				try {
+					await writer.write(chunk);
+				} finally {
+					writer.releaseLock();
+				}
 				return;
 			}
 
@@ -302,7 +325,7 @@ async function vlessOverWSHandler(request) {
 				rawDataIndex,
 				vlessVersion = new Uint8Array([0, 0]),
 				isUDP,
-			} = processVlessHeader(chunk, userID);
+			} = processVlessHeader(chunk, connectionOptions.userID);
 			// 设置地址和端口信息，用于日志
 			address = addressRemote;
 			portWithRandomLog = `${portRemote}--${Math.random()} ${isUDP ? 'udp ' : 'tcp '} `;
@@ -331,7 +354,7 @@ async function vlessOverWSHandler(request) {
 			}
 			// 处理 TCP 出站连接
 			log(`处理 TCP 出站连接 ${addressRemote}:${portRemote}`);
-			handleTCPOutBound(remoteSocketWapper, addressType, addressRemote, portRemote, rawClientData, webSocket, vlessResponseHeader, log);
+			await handleTCPOutBound(remoteSocketWapper, addressType, addressRemote, portRemote, rawClientData, webSocket, vlessResponseHeader, log, connectionOptions);
 		},
 		close() {
 			log(`readableWebSocketStream 已关闭`);
@@ -341,6 +364,7 @@ async function vlessOverWSHandler(request) {
 		},
 	})).catch((err) => {
 		log('readableWebSocketStream 管道错误', err);
+		safeCloseWebSocket(webSocket);
 	});
 
 	// 返回一个 WebSocket 升级的响应
@@ -373,7 +397,7 @@ async function vlessOverWSHandler(request) {
  * @param {function} log The logging function.
  * @returns {Promise<void>} The remote socket.
  */
-async function handleTCPOutBound(remoteSocket, addressType, addressRemote, portRemote, rawClientData, webSocket, vlessResponseHeader, log,) {
+async function handleTCPOutBound(remoteSocket, addressType, addressRemote, portRemote, rawClientData, webSocket, vlessResponseHeader, log, connectionOptions) {
 	/**
 	 * 连接远程服务器并写入数据
 	 * @param {string} address 要连接的地址
@@ -386,18 +410,26 @@ async function handleTCPOutBound(remoteSocket, addressType, addressRemote, portR
 		log(`connected to ${address}:${port}`);
 		//if (/^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?).){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/.test(address)) address = `${atob('d3d3Lg==')}${address}${atob('LmlwLjA5MDIyNy54eXo=')}`;
 		// 如果指定使用 SOCKS5 代理，则通过 SOCKS5 协议连接；否则直接连接
-		const tcpSocket = socks ? await socks5Connect(addressType, address, port, log)
+		const tcpSocket = socks ? await socks5Connect(addressType, address, port, log, connectionOptions.socks5)
 			: connect({
 				hostname: address,
 				port: port,
 			});
 		remoteSocket.value = tcpSocket;
+		// A rejected Socket.closed promise must not become an unhandled rejection.
+		tcpSocket.closed.catch(() => {});
 		//log(`connected to ${address}:${port}`);
 		const writer = tcpSocket.writable.getWriter();
 		// 首次写入，通常是 TLS 客户端 Hello 消息
-		await writer.write(rawClientData);
-		writer.releaseLock();
-		return tcpSocket;
+		try {
+			await writer.write(rawClientData);
+			return tcpSocket;
+		} catch (error) {
+			try { await tcpSocket.close(); } catch {}
+			throw error;
+		} finally {
+			writer.releaseLock();
+		}
 	}
 
 	/**
@@ -405,31 +437,35 @@ async function handleTCPOutBound(remoteSocket, addressType, addressRemote, portR
 	 * 这可能是因为某些网络问题导致的连接失败
 	 */
 	async function retry() {
-		if (enableSocks) {
+		if (webSocket.readyState !== WS_READY_STATE_OPEN) return;
+		let tcpSocket;
+		if (connectionOptions.socks5) {
 			// 如果启用了 SOCKS5，通过 SOCKS5 代理重试连接
 			tcpSocket = await connectAndWrite(addressRemote, portRemote, true);
 		} else {
 			// 否则，尝试使用预设的代理 IP（如果有）或原始地址重试连接
-			if (!proxyIP || proxyIP == '') proxyIP = atob('cHJveHlpcC5meHhrLmRlZHluLmlv');
-			tcpSocket = await connectAndWrite(proxyIP || addressRemote, portRemote);
+			const fallbackAddress = connectionOptions.proxyIP;
+			if (!fallbackAddress) throw new Error('Configure PROXYIP or SOCKS5 for fallback connections.');
+			tcpSocket = await connectAndWrite(fallbackAddress, portRemote);
 		}
-		// 无论重试是否成功，都要关闭 WebSocket（可能是为了重新建立连接）
-		tcpSocket.closed.catch(error => {
-			console.log('retry tcpSocket closed error', error);
-		}).finally(() => {
-			safeCloseWebSocket(webSocket);
-		})
-		// 建立从远程 Socket 到 WebSocket 的数据流
-		remoteSocketToWS(tcpSocket, webSocket, vlessResponseHeader, null, log);
+		forward(tcpSocket, null);
 	}
 
-	// 首次尝试连接远程服务器
-	let tcpSocket = await connectAndWrite(addressRemote, portRemote);
+	function forward(tcpSocket, fallback) {
+		// Do not block client writes while the response stream remains open.
+		remoteSocketToWS(tcpSocket, webSocket, vlessResponseHeader, fallback, log).catch(() => {
+			log('Outbound forwarding failed.');
+			safeCloseWebSocket(webSocket);
+		});
+	}
 
-	// 当远程 Socket 就绪时，将其传递给 WebSocket
-	// 建立从远程服务器到 WebSocket 的数据流，用于将远程服务器的响应发送回客户端
-	// 如果连接失败或无数据，retry 函数将被调用进行重试
-	remoteSocketToWS(tcpSocket, webSocket, vlessResponseHeader, retry, log);
+	try {
+		const tcpSocket = await connectAndWrite(addressRemote, portRemote);
+		forward(tcpSocket, retry);
+	} catch {
+		// A connection or initial write can fail before a readable stream exists.
+		await retry();
+	}
 }
 
 /**
@@ -727,6 +763,7 @@ async function remoteSocketToWS(remoteSocket, webSocket, vlessResponseHeader, re
 						controller.error(
 							'webSocket.readyState is not open, maybe close'
 						);
+						return;
 					}
 
 					if (vlessHeader) {
@@ -747,9 +784,7 @@ async function remoteSocketToWS(remoteSocket, webSocket, vlessResponseHeader, re
 				close() {
 					// 当远程连接的可读流关闭时
 					log(`remoteConnection!.readable is close with hasIncomingData is ${hasIncomingData}`);
-					// 不需要主动关闭 WebSocket，因为这可能导致 HTTP ERR_CONTENT_LENGTH_MISMATCH 问题
-					// 客户端无论如何都会发送关闭事件
-					// safeCloseWebSocket(webSocket);
+					// Close below, after every response chunk has finished forwarding.
 				},
 				abort(reason) {
 					// 当远程连接的可读流中断时
@@ -763,16 +798,17 @@ async function remoteSocketToWS(remoteSocket, webSocket, vlessResponseHeader, re
 				`remoteSocketToWS has exception `,
 				error.stack || error
 			);
-			// 发生错误时安全地关闭 WebSocket
-			safeCloseWebSocket(webSocket);
+			// Decide whether to retry before closing the client connection.
 		});
 
 	// 处理 Cloudflare 连接 Socket 的特殊错误情况
 	// 1. Socket.closed 将有错误
 	// 2. Socket.readable 将关闭，但没有任何数据
-	if (hasIncomingData === false && retry) {
+	if (hasIncomingData === false && retry && webSocket.readyState === WS_READY_STATE_OPEN) {
 		log(`retry`);
-		retry(); // 调用重试函数，尝试重新建立连接
+		await retry();
+	} else {
+		safeCloseWebSocket(webSocket);
 	}
 }
 
@@ -976,8 +1012,8 @@ async function handleDNSQuery(udpChunk, webSocket, vlessResponseHeader, log) {
  * @param {number} portRemote 目标端口
  * @param {function} log 日志记录函数
  */
-async function socks5Connect(addressType, addressRemote, portRemote, log) {
-	const { username, password, hostname, port } = parsedSocks5Address;
+async function socks5Connect(addressType, addressRemote, portRemote, log, socks5Config) {
+	const { username, password, hostname, port } = socks5Config;
 	// 连接到 SOCKS5 代理服务器
 	const socket = connect({
 		hostname, // SOCKS5 服务器的主机名
@@ -1300,7 +1336,7 @@ async function getVLESSConfig(userID, hostName, sub, UA, RproxyIP, _url) {
 			
 				if (!response.ok) {
 					console.error('获取地址时出错:', response.status, response.statusText);
-					return; // 如果有错误，直接返回
+					throw new Error('Optional proxy host list is unavailable.');
 				}
 			
 				const text = await response.text();
@@ -1484,7 +1520,7 @@ function copyToClipboard(text) {
 					
 						if (!response.ok) {
 							console.error('获取地址时出错:', response.status, response.statusText);
-							return; // 如果有错误，直接返回
+							throw new Error('Optional proxy host list is unavailable.');
 						}
 					
 						const text = await response.text();
@@ -1633,7 +1669,7 @@ async function getAddressesapi(api) {
 
 	const timeout = setTimeout(() => {
 		controller.abort(); // 取消所有请求
-	}, 2000); // 2秒后触发
+	}, 5000);
 
 	try {
 		// 使用Promise.allSettled等待所有API请求完成，无论成功或失败
@@ -1663,10 +1699,25 @@ async function getAddressesapi(api) {
 		clearTimeout(timeout);
 	}
 
-	const newAddressesapi = await ADD(newapi);
+	const newAddressesapi = (await ADD(newapi)).map(value => value.trim()).filter(isSubscriptionAddress);
+	if (newAddressesapi.length === 0) {
+		throw new SubscriptionSourceError('No valid addresses were returned by the configured APIs.');
+	}
 
 	// 返回处理后的结果
-	return newAddressesapi;
+	return [...new Set(newAddressesapi)];
+}
+
+function isSubscriptionAddress(address) {
+	const endpoint = address.split('#')[0].trim();
+	if (!endpoint || /[\s<>]/.test(endpoint)) return false;
+	try {
+		const parsed = new URL(`https://${endpoint}`);
+		return !parsed.username && !parsed.password && !parsed.search && !parsed.hash &&
+			parsed.pathname === '/' && (parsed.hostname.includes('.') || parsed.hostname.startsWith('['));
+	} catch {
+		return false;
+	}
 }
 
 async function getAddressescsv(tls) {
@@ -1732,13 +1783,12 @@ async function getAddressescsv(tls) {
 
 function subAddresses(host,UUID,noTLS,newAddressesapi,newAddressescsv,newAddressesnotlsapi,newAddressesnotlscsv) {
 	const regex = /^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}|\[.*\]):?(\d+)?#?(.*)?$/;
-	addresses = addresses.concat(newAddressesapi);
-	addresses = addresses.concat(newAddressescsv);
+	const subscriptionAddresses = [...addresses, ...newAddressesapi, ...newAddressescsv]
+		.map(value => value.trim()).filter(isSubscriptionAddress);
 	let notlsresponseBody ;
 	if (noTLS == 'true'){
-		addressesnotls = addressesnotls.concat(newAddressesnotlsapi);
-		addressesnotls = addressesnotls.concat(newAddressesnotlscsv);
-		const uniqueAddressesnotls = [...new Set(addressesnotls)];
+		const uniqueAddressesnotls = [...new Set([...addressesnotls, ...newAddressesnotlsapi, ...newAddressesnotlscsv]
+			.map(value => value.trim()).filter(isSubscriptionAddress))];
 
 		notlsresponseBody = uniqueAddressesnotls.map(address => {
 			let port = "80";
@@ -1795,7 +1845,7 @@ function subAddresses(host,UUID,noTLS,newAddressesapi,newAddressescsv,newAddress
 	}
 
 	// 使用Set对象去重
-	const uniqueAddresses = [...new Set(addresses)];
+	const uniqueAddresses = [...new Set(subscriptionAddresses)];
 
 	const responseBody = uniqueAddresses.map(address => {
 		let port = "443";

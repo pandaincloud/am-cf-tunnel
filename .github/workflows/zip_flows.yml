@@ -3,6 +3,7 @@ name: zip_flows # 工作流程的名称
 on: 
   workflow_dispatch:  # 手动触发
   push: 
+    branches: [main]
     paths: 
       - '_worker.js' # 当 _worker.js 文件发生变动时触发
 
